@@ -13,7 +13,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
-#[command(name = "video-server")]
+#[command(name = "streamshit")]
 #[command(about = "A simple video streaming server")]
 struct Args {
     /// Port to listen on
@@ -81,7 +81,7 @@ fn generate_video_list_html(videos: &[PathBuf], server_url: &str) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>Video Server</title>
+    <title>Streamshit</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 40px; }
         h1 { color: #333; }
@@ -115,7 +115,7 @@ fn generate_video_list_html(videos: &[PathBuf], server_url: &str) -> String {
     </style>
 </head>
 <body>
-    <h1>Video Server</h1>
+    <h1>Streamshit</h1>
 "#,
     );
 
