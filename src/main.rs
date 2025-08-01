@@ -83,7 +83,11 @@ fn get_video_list(path: &str) -> Vec<VideoEntry> {
         .into_iter()
         .enumerate()
         .map(|(i, path)| {
-            let extension = path.extension().unwrap().to_str().unwrap();
+            let extension = path
+                .extension()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default();
             let alias = format!("{}.{}", i + 1, extension);
             VideoEntry { path, alias }
         })
