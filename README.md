@@ -1,6 +1,6 @@
 # 🎬 StreamShit
 
-A lightweight, fast video streaming server built in Rust. Stream your local video collection over the network with a simple web interface.
+A lightweight, fast video streaming server built in Rust. Stream your local video collection over the network with a simple web interface. I primarily use this to stream my movies to my TV/Phone using VLC.
 
 ## ✨ Features
 

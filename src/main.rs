@@ -2,10 +2,11 @@ use std::convert::Infallible;
 use std::fs;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Parser;
 use http_body_util::Full;
-use hyper::body::Bytes;
+use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -29,6 +30,12 @@ struct Args {
     video_dir: String,
 }
 
+#[derive(Clone)]
+struct VideoEntry {
+    path: PathBuf,
+    alias: String,
+}
+
 fn get_local_ip() -> Result<String, Box<dyn std::error::Error>> {
     // Connect to a remote address to determine local IP
     let socket = UdpSocket::bind("0.0.0.0:0")?;
@@ -38,11 +45,10 @@ fn get_local_ip() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 async fn list_videos_handler(
-    video_dir: String,
-    server_url: String,
-    _req: Request<hyper::body::Incoming>,
+    video_list: Arc<Vec<VideoEntry>>,
+    server_url: Arc<String>,
+    _req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let video_list = get_video_list(&video_dir);
     let html = generate_video_list_html(&video_list, &server_url);
 
     let response = Response::builder()
@@ -53,9 +59,9 @@ async fn list_videos_handler(
     Ok(response)
 }
 
-fn get_video_list(path: &str) -> Vec<PathBuf> {
+fn get_video_list(path: &str) -> Vec<VideoEntry> {
     let video_extensions = ["mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v"];
-    let mut video_list = Vec::new();
+    let mut video_paths = Vec::new();
 
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
@@ -64,19 +70,27 @@ fn get_video_list(path: &str) -> Vec<PathBuf> {
                 if let Some(extension) = path.extension() {
                     if let Some(ext_str) = extension.to_str() {
                         if video_extensions.contains(&ext_str.to_lowercase().as_str()) {
-                            video_list.push(path);
+                            video_paths.push(path);
                         }
                     }
                 }
             }
         }
     }
+    video_paths.sort();
 
-    video_list.sort();
-    video_list
+    video_paths
+        .into_iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let extension = path.extension().unwrap().to_str().unwrap();
+            let alias = format!("{}.{}", i + 1, extension);
+            VideoEntry { path, alias }
+        })
+        .collect()
 }
 
-fn generate_video_list_html(videos: &[PathBuf], server_url: &str) -> String {
+fn generate_video_list_html(videos: &[VideoEntry], server_url: &str) -> String {
     let mut html = String::from(
         r#"<!DOCTYPE html>
 <html>
@@ -130,9 +144,9 @@ fn generate_video_list_html(videos: &[PathBuf], server_url: &str) -> String {
     } else {
         html.push_str("<ul class=\"video-list\">");
         for video in videos {
-            if let Some(filename) = video.file_name() {
+            if let Some(filename) = video.path.file_name() {
                 if let Some(name) = filename.to_str() {
-                    let full_url = format!("{}/{}", server_url, name);
+                    let full_url = format!("{}/{}", server_url, video.alias);
                     html.push_str(&format!(
                         r#"<li class="video-item">
                             <div class="video-name">{}</div>
@@ -151,66 +165,37 @@ fn generate_video_list_html(videos: &[PathBuf], server_url: &str) -> String {
 }
 
 async fn router(
-    video_dir: String,
-    server_url: String,
-    req: Request<hyper::body::Incoming>,
+    req: Request<Incoming>,
+    video_list: Arc<Vec<VideoEntry>>,
+    server_url: Arc<String>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let path = req.uri().path();
     let method = req.method();
 
     match (method, path) {
-        (&Method::GET, "/") => {
-            // Serve the video list page
-            list_videos_handler(video_dir, server_url, req).await
-        }
+        (&Method::GET, "/") => list_videos_handler(video_list, server_url, req).await,
         (&Method::GET, path) => {
-            // Remove leading slash and check if it's a video file
             let filename = path.strip_prefix('/').unwrap_or(path);
 
-            // Check if this is a video file by checking if it exists and has a video extension
-            if is_video_file(&video_dir, filename) {
-                serve_video(video_dir, filename).await
+            // Find video by alias or by filename
+            let video_entry = video_list.iter().find(|v| {
+                v.alias == filename || v.path.file_name().unwrap().to_str().unwrap() == filename
+            });
+
+            if let Some(entry) = video_entry {
+                serve_video(&entry.path).await
             } else {
-                // 404 for any other path
-                let response = Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header("Content-Type", "text/html")
-                    .body(Full::new(Bytes::from("<h1>404 Not Found</h1>")))
-                    .unwrap();
-                Ok(response)
+                not_found()
             }
         }
-        _ => {
-            // 404 for any other path
-            let response = Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header("Content-Type", "text/html")
-                .body(Full::new(Bytes::from("<h1>404 Not Found</h1>")))
-                .unwrap();
-            Ok(response)
-        }
+        _ => not_found(),
     }
 }
 
-async fn serve_video(
-    video_dir: String,
-    filename: &str,
-) -> Result<Response<Full<Bytes>>, Infallible> {
-    let video_path = Path::new(&video_dir).join(filename);
-
-    // Security check: prevent directory traversal
-    if !video_path.starts_with(&video_dir) {
-        let response = Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .header("Content-Type", "text/html")
-            .body(Full::new(Bytes::from("<h1>403 Forbidden</h1>")))
-            .unwrap();
-        return Ok(response);
-    }
-
-    match fs::read(&video_path) {
+async fn serve_video(video_path: &Path) -> Result<Response<Full<Bytes>>, Infallible> {
+    match fs::read(video_path) {
         Ok(content) => {
-            let mime_type = get_mime_type(filename);
+            let mime_type = get_mime_type(video_path.to_str().unwrap());
             let response = Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", mime_type)
@@ -229,6 +214,15 @@ async fn serve_video(
             Ok(response)
         }
     }
+}
+
+fn not_found() -> Result<Response<Full<Bytes>>, Infallible> {
+    let response = Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("Content-Type", "text/html")
+        .body(Full::new(Bytes::from("<h1>404 Not Found</h1>")))
+        .unwrap();
+    Ok(response)
 }
 
 fn get_mime_type(filename: &str) -> &'static str {
@@ -250,57 +244,35 @@ fn get_mime_type(filename: &str) -> &'static str {
     }
 }
 
-fn is_video_file(video_dir: &str, filename: &str) -> bool {
-    let video_extensions = ["mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v"];
-
-    // Check if file has video extension
-    let has_video_extension = Path::new(filename)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| video_extensions.contains(&ext.to_lowercase().as_str()))
-        .unwrap_or(false);
-
-    if !has_video_extension {
-        return false;
-    }
-
-    // Check if file actually exists in the video directory
-    let video_path = Path::new(video_dir).join(filename);
-    video_path.exists() && video_path.is_file()
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-    // Get the actual local IP address
     let local_ip = get_local_ip().unwrap_or_else(|_| "localhost".to_string());
-    let server_url = format!("http://{}:{}", local_ip, args.port);
+    let server_url = Arc::new(format!("http://{}:{}", local_ip, args.port));
 
     println!("Starting video server on {}", addr);
     println!("Video directory: {}", args.video_dir);
     println!("Server URL: {}", server_url);
 
-    // We create a TcpListener and bind it to 127.0.0.1:3000
-    let listener = TcpListener::bind(addr).await?;
-    let video_dir = args.video_dir.clone();
+    let video_list = Arc::new(get_video_list(&args.video_dir));
+    println!("Found {} video files.", video_list.len());
 
-    // We start a loop to continuously accept incoming connections
+    let listener = TcpListener::bind(addr).await?;
+
     loop {
         let (stream, _) = listener.accept().await?;
-
-        // Use an adapter to access something implementing `tokio::io` traits as if they implement
-        // `hyper::rt` IO traits.
         let io = TokioIo::new(stream);
-        let video_dir_clone = video_dir.clone();
+
+        let video_list_clone = video_list.clone();
         let server_url_clone = server_url.clone();
 
-        // Spawn a tokio task to serve multiple connections concurrently
         tokio::task::spawn(async move {
             let service = service_fn(move |req| {
-                router(video_dir_clone.clone(), server_url_clone.clone(), req)
+                router(req, video_list_clone.clone(), server_url_clone.clone())
             });
+
             if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
                 eprintln!("Error serving connection: {:?}", err);
             }
